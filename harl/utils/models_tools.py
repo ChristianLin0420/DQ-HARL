@@ -42,12 +42,16 @@ def get_active_func(activation_func):
         return nn.LeakyReLU()
     elif activation_func == "selu":
         return nn.SELU()
+    elif activation_func == "silu" or activation_func == "swish":
+        return nn.SiLU()
+    elif activation_func == "gelu":
+        return nn.GELU()
     elif activation_func == "hardswish":
         return nn.Hardswish()
     elif activation_func == "identity":
         return nn.Identity()
     else:
-        assert False, "activation function not supported!"
+        assert False, f"activation function {activation_func} not supported!"
 
 
 def get_init_method(initialization_method):

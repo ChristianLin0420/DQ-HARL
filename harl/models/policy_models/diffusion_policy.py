@@ -26,6 +26,28 @@ class SinusoidalPositionalEncoding(nn.Module):
         return embeddings
 
 
+def get_activation_gain(activation_func):
+    """Get the gain for activation function, with custom handling for newer activations."""
+    # Handle activations that PyTorch's calculate_gain doesn't support
+    if activation_func in ["silu", "swish"]:
+        # SiLU/Swish typically uses a gain similar to ReLU
+        return nn.init.calculate_gain("relu")
+    elif activation_func == "gelu":
+        # GELU typically uses a gain similar to ReLU
+        return nn.init.calculate_gain("relu")
+    elif activation_func == "mish":
+        # Mish typically uses a gain similar to ReLU
+        return nn.init.calculate_gain("relu")
+    else:
+        # Use PyTorch's built-in calculation for standard activations
+        try:
+            return nn.init.calculate_gain(activation_func)
+        except ValueError:
+            # Fallback to 1.0 if the activation is not recognized
+            print(f"Warning: Unknown activation function '{activation_func}', using gain=1.0")
+            return 1.0
+
+
 class DiffusionMLP(nn.Module):
     """MLP network for diffusion model that takes observation, time, and current action."""
     
@@ -49,10 +71,10 @@ class DiffusionMLP(nn.Module):
         # Build MLP Layers
         active_func = get_active_func(self.activation_func)
         init_method = get_init_method(self.initialization_method)
-        gain = nn.init.calculate_gain(self.activation_func)
+        gain = get_activation_gain(self.activation_func)  # Use our custom function
 
         def init_(m):
-            return init(m, init_method, lambda x: nn.init.constant_(x, 0), gain = gain)
+            return init(m, init_method, lambda x: nn.init.constant_(x, 0), gain=gain)
         
         layers = []
         prev_dim = input_dim
@@ -194,21 +216,15 @@ class DiffusionPolicy(nn.Module):
         if self.use_naive_recurrent_policy or self.use_recurrent_policy:
             obs_features, rnn_states = self.rnn(obs_features, rnn_states, masks)
         
-        # Generate actions using diffusion process
-        actions = self.sample_actions(obs_features, deterministic)
-        
-        # Compute approximate log probabilities
-        # For simplicity, we use a Gaussian approximation
-        # In practice, this would require more sophisticated computation
-        action_log_probs = -0.5 * torch.sum(actions**2, dim=-1, keepdim=True) - \
-                          0.5 * self.action_dim * np.log(2 * np.pi)
+        # Generate actions using diffusion process and compute log probabilities
+        actions, action_log_probs = self.sample_actions_with_log_prob(obs_features, deterministic)
         
         return actions, action_log_probs, rnn_states
 
-    def sample_actions(self, obs_features, deterministic=False):
+    def sample_actions_with_log_prob(self, obs_features, deterministic=False):
         """
-        Sample actions using the reverse diffusion process.
-        Implements the GenPO algorithm with coupled noise vectors.
+        Sample actions using the reverse diffusion process and compute log probabilities.
+        This implements a more sophisticated log probability computation.
         """
         batch_size = obs_features.shape[0]
         
@@ -220,30 +236,55 @@ class DiffusionPolicy(nn.Module):
             x = torch.randn(batch_size, self.action_dim, device=self.device)
             y = torch.randn(batch_size, self.action_dim, device=self.device)
         
+        # Track log probabilities through the reverse process
+        log_prob_x = torch.zeros(batch_size, 1, device=self.device)
+        log_prob_y = torch.zeros(batch_size, 1, device=self.device)
+        
+        # Store initial noise for log probability computation
+        x_init, y_init = x.clone(), y.clone()
+        
         # Reverse diffusion process
         for t in reversed(range(self.num_diffusion_steps)):
             # Create time tensor
-            time_tensor = torch.full((batch_size,), t, device=self.device, dtype=torch.long)
+            time_tensor = torch.full((batch_size,), t, device=self.device, dtype=torch.float32)
             
             # Predict noise for both components
-            predicted_noise_x = self.diffusion_net(obs_features, x, time_tensor.float())
-            predicted_noise_y = self.diffusion_net(obs_features, y, time_tensor.float())
+            predicted_noise_x = self.diffusion_net(obs_features, x, time_tensor)
+            predicted_noise_y = self.diffusion_net(obs_features, y, time_tensor)
             
-            # Compute denoising step size
+            # Compute denoising step parameters
             alpha_t = self.alphas[t]
             beta_t = self.betas[t]
+            sqrt_alpha_t = torch.sqrt(alpha_t)
+            sqrt_one_minus_alpha_cumprod_t = self.sqrt_one_minus_alphas_cumprod[t]
             
-            # Reverse step (Eq. 7 from paper)
+            # Compute mean of reverse process
+            mean_x = (x - beta_t / sqrt_one_minus_alpha_cumprod_t * predicted_noise_x) / sqrt_alpha_t
+            mean_y = (y - beta_t / sqrt_one_minus_alpha_cumprod_t * predicted_noise_y) / sqrt_alpha_t
+            
             if t > 0:
-                noise_x = torch.randn_like(x) if not deterministic else torch.zeros_like(x)
-                noise_y = torch.randn_like(y) if not deterministic else torch.zeros_like(y)
+                # Add noise for non-final steps
+                if not deterministic:
+                    noise_x = torch.randn_like(x)
+                    noise_y = torch.randn_like(y)
+                    
+                    # Compute log probability contribution from this step
+                    # This is based on the Gaussian transition probability
+                    sigma_t = torch.sqrt(beta_t)
+                    log_prob_x += -0.5 * torch.sum((noise_x)**2, dim=-1, keepdim=True) - \
+                                 0.5 * self.action_dim * torch.log(2 * np.pi * sigma_t**2)
+                    log_prob_y += -0.5 * torch.sum((noise_y)**2, dim=-1, keepdim=True) - \
+                                 0.5 * self.action_dim * torch.log(2 * np.pi * sigma_t**2)
+                else:
+                    noise_x = torch.zeros_like(x)
+                    noise_y = torch.zeros_like(y)
+                
+                x_tilde = mean_x + torch.sqrt(beta_t) * noise_x
+                y_tilde = mean_y + torch.sqrt(beta_t) * noise_y
             else:
-                noise_x = torch.zeros_like(x)
-                noise_y = torch.zeros_like(y)
-            
-            # Update using predicted noise
-            x_tilde = (x - beta_t / torch.sqrt(1 - self.alphas_cumprod[t]) * predicted_noise_x) / torch.sqrt(alpha_t) + torch.sqrt(beta_t) * noise_x
-            y_tilde = (y - beta_t / torch.sqrt(1 - self.alphas_cumprod[t]) * predicted_noise_y) / torch.sqrt(alpha_t) + torch.sqrt(beta_t) * noise_y
+                # Final step - no noise
+                x_tilde = mean_x
+                y_tilde = mean_y
             
             # Mixing step (Eq. 7 from paper)
             x_new = self.mixing_p * x_tilde + (1 - self.mixing_p) * y_tilde
@@ -254,12 +295,24 @@ class DiffusionPolicy(nn.Module):
         # Final action is average of coupled components
         actions = (x + y) / 2.0
         
-        return actions
-    
+        # Compute final log probability
+        # Include the initial noise distribution and the Jacobian of the averaging operation
+        initial_log_prob = -0.5 * torch.sum(x_init**2 + y_init**2, dim=-1, keepdim=True) - \
+                          self.action_dim * np.log(2 * np.pi)
+        
+        # Add log probability from the reverse process
+        total_log_prob = initial_log_prob + log_prob_x + log_prob_y
+        
+        # Jacobian correction for the averaging operation (x + y) / 2
+        # The Jacobian determinant is 1/2^action_dim, so log|J| = -action_dim * log(2)
+        jacobian_correction = -self.action_dim * np.log(2)
+        total_log_prob += jacobian_correction
+        
+        return actions, total_log_prob
+
     def evaluate_actions(self, obs, rnn_states, action, masks, available_actions=None, active_masks=None):
         """
-        Evaluate log probabilities and entropy for given actions.
-        This is complex for diffusion models - we use approximations.
+        Align evaluation with the actual diffusion generation process.
         """
         obs = check(obs).to(**self.tpdv)
         rnn_states = check(rnn_states).to(**self.tpdv)
@@ -273,30 +326,33 @@ class DiffusionPolicy(nn.Module):
         if self.use_naive_recurrent_policy or self.use_recurrent_policy:
             obs_features, _ = self.rnn(obs_features, rnn_states, masks)
         
-        # For diffusion models, computing exact log probabilities is complex
-        # We need to compute them through the diffusion network to maintain gradients
-        
-        # Use the diffusion network to compute a score/log probability
-        # This is a simplified approach - in practice you might want the exact computation
+        # Use the SAME process as action generation for evaluation
         batch_size = obs_features.shape[0]
         
-        # Create a dummy time step (we'll use the middle of the diffusion process)
-        time_step = torch.full((batch_size,), self.num_diffusion_steps // 2, 
-                              device=self.device, dtype=torch.float32)
+        # Sample multiple actions and find the one closest to the target
+        num_samples = 5  # Sample multiple actions for better evaluation
+        log_probs = []
         
-        # Compute noise prediction for the given action
-        # This creates a computational graph connected to the diffusion network
-        predicted_noise = self.diffusion_net(obs_features, action, time_step)
+        for _ in range(num_samples):
+            # Generate action using the same process as forward()
+            sample_action, sample_log_prob = self.sample_actions_with_log_prob(obs_features, deterministic=False)
+            
+            # Compute likelihood of the target action given this sample
+            mse = torch.sum((action - sample_action)**2, dim=-1, keepdim=True)
+            log_prob = -0.5 * mse / (0.1**2) - 0.5 * self.action_dim * np.log(2 * np.pi * 0.1**2)
+            log_probs.append(log_prob)
         
-        # Compute log probability based on the noise prediction
-        # This is an approximation but maintains gradients
-        noise_mse = torch.sum((predicted_noise - action) ** 2, dim=-1, keepdim=True)
-        action_log_probs = -0.5 * noise_mse  # Negative MSE as log prob approximation
+        # Use the maximum likelihood among samples
+        action_log_probs = torch.stack(log_probs, dim=0).max(dim=0)[0]
         
-        # Compute entropy based on the noise prediction variance
-        # This also maintains gradients through the network
-        noise_var = torch.var(predicted_noise, dim=-1, keepdim=True)
-        dist_entropy = 0.5 * torch.log(2 * np.pi * torch.e * (noise_var + 1e-8))
+        # Compute entropy based on action diversity
+        if hasattr(self, '_recent_actions'):
+            self._recent_actions = torch.cat([self._recent_actions[-100:], action], dim=0)
+        else:
+            self._recent_actions = action
         
-        # Return None for action distribution as it's complex for diffusion models
+        action_var = torch.var(self._recent_actions, dim=0).mean()
+        dist_entropy = 0.5 * torch.log(2 * np.pi * torch.e * (action_var + 1e-8))
+        dist_entropy = dist_entropy.expand(batch_size, 1)
+        
         return action_log_probs, dist_entropy, None

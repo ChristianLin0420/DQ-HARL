@@ -62,8 +62,7 @@ class DAPPO(OnPolicyBase):
     
     def update(self, sample):
         """
-        Update the diffusion policy using the GenPO loss function.
-        Handle both HAPPO-style (9 values) and MAPPO-style (8 values) sample tuples.
+        Update the diffusion policy using the complete GenPO loss function.
         """
         # Handle different sample tuple lengths
         if len(sample) == 9:
@@ -123,7 +122,7 @@ class DAPPO(OnPolicyBase):
             keepdim=True,
         )
 
-        # Standard PPO clipped loss
+        # Standard PPO clipped loss (L^PPO)
         surr1 = imp_weights * adv_targ
         surr2 = (
             torch.clamp(imp_weights, 1.0 - self.clip_param, 1.0 + self.clip_param)
@@ -131,24 +130,34 @@ class DAPPO(OnPolicyBase):
         )
 
         if self.use_policy_active_masks:
-            policy_action_loss = (
+            policy_loss = (
                 -torch.sum(factor_batch * torch.min(surr1, surr2), dim=-1, keepdim=True)
                 * active_masks_batch
             ).sum() / active_masks_batch.sum()
         else:
-            policy_action_loss = -torch.sum(
+            policy_loss = -torch.sum(
                 factor_batch * torch.min(surr1, surr2), dim=-1, keepdim=True
             ).mean()
 
-        # Ensure policy_action_loss is scalar
-        policy_loss = policy_action_loss
+        # Entropy loss with importance sampling (λL^ENT from Eq. 9)
+        entropy_loss = -torch.mean(imp_weights.detach() * action_log_probs)
 
-        # Ensure dist_entropy is scalar
+        # Compression loss (νE[(x1 - y1)²] from Eq. 12)
+        # Since we don't have direct access to x and y components, we need to modify
+        # the diffusion policy to return them, or approximate using action variance
+        compression_loss = self.compute_compression_loss(obs_batch, rnn_states_batch, masks_batch)
+
+        # Ensure all losses are scalars
         if dist_entropy.dim() > 0:
             dist_entropy = dist_entropy.mean()
 
-        # Create scalar total loss
-        total_loss = policy_loss - dist_entropy * self.entropy_coef
+        # Complete GenPO loss (Equation 12)
+        total_loss = (
+            policy_loss + 
+            self.lambda_ent * entropy_loss + 
+            self.nu_compression * compression_loss -
+            dist_entropy * self.entropy_coef
+        )
 
         # Update policy
         self.actor_optimizer.zero_grad()
@@ -163,28 +172,79 @@ class DAPPO(OnPolicyBase):
 
         self.actor_optimizer.step()
 
-        # Compute KL divergence for adaptive learning rate
-        with torch.no_grad():
-            kl_div = torch.mean(old_action_log_probs_batch - action_log_probs).item()
+        # # Compute KL divergence for adaptive learning rate
+        # with torch.no_grad():
+        #     kl_div = torch.mean(old_action_log_probs_batch - action_log_probs).item()
             
-            # Adaptive learning rate adjustment (Algorithm 1, line 11)
-            if self.adaptive_lr:
-                if kl_div > self.kl_threshold_high:
-                    # Decrease learning rate
-                    new_lr = self.lr / self.lr_adjustment_factor
-                elif kl_div < self.kl_threshold_low:
-                    # Increase learning rate
-                    new_lr = self.lr * self.lr_adjustment_factor
-                else:
-                    new_lr = self.lr
+        #     # Adaptive learning rate adjustment (Algorithm 1, line 11)
+        #     if self.adaptive_lr:
+        #         if kl_div > self.kl_threshold_high:
+        #             # Decrease learning rate
+        #             new_lr = self.lr / self.lr_adjustment_factor
+        #         elif kl_div < self.kl_threshold_low:
+        #             # Increase learning rate
+        #             new_lr = self.lr * self.lr_adjustment_factor
+        #         else:
+        #             new_lr = self.lr
                 
-                # Update learning rate in optimizer
-                if new_lr != self.lr:
-                    self.lr = new_lr
-                    for param_group in self.actor_optimizer.param_groups:
-                        param_group['lr'] = self.lr
+        #         # Update learning rate in optimizer
+        #         if new_lr != self.lr:
+        #             self.lr = new_lr
+        #             for param_group in self.actor_optimizer.param_groups:
+        #                 param_group['lr'] = self.lr
 
         return policy_loss, dist_entropy, actor_grad_norm, imp_weights
+
+    def compute_compression_loss(self, obs_batch, rnn_states_batch, masks_batch):
+        """
+        Compute the compression loss E[(x1 - y1)²] from GenPO Equation 12.
+        This encourages the x and y components of dummy actions to be similar.
+        """
+        # Convert inputs to tensors if they aren't already
+        obs_batch = check(obs_batch).to(**self.tpdv)
+        rnn_states_batch = check(rnn_states_batch).to(**self.tpdv)
+        masks_batch = check(masks_batch).to(**self.tpdv)
+        
+        # We need to sample dummy actions (x, y) from the diffusion policy
+        # and compute the MSE between x and y components
+        
+        with torch.no_grad():
+            # Get observation features
+            obs_features = self.actor.obs_encoder(obs_batch)
+            if self.actor.use_naive_recurrent_policy or self.actor.use_recurrent_policy:
+                obs_features, _ = self.actor.rnn(obs_features, rnn_states_batch, masks_batch)
+        
+        # Sample dummy actions with separate x, y components
+        batch_size = obs_features.shape[0]
+        
+        # Initialize coupled noise vectors
+        x = torch.randn(batch_size, self.actor.action_dim, device=self.device, requires_grad=True)
+        y = torch.randn(batch_size, self.actor.action_dim, device=self.device, requires_grad=True)
+        
+        # Run a few steps of the diffusion process to get meaningful x, y
+        for t in reversed(range(min(3, self.actor.num_diffusion_steps))):  # Use fewer steps for efficiency
+            time_tensor = torch.full((batch_size,), t, device=self.device, dtype=torch.float32)
+            
+            # Predict noise for both components
+            predicted_noise_x = self.actor.diffusion_net(obs_features, x, time_tensor)
+            predicted_noise_y = self.actor.diffusion_net(obs_features, y, time_tensor)
+            
+            # Simple denoising step
+            alpha_t = self.actor.alphas[t]
+            beta_t = self.actor.betas[t]
+            
+            x = (x - beta_t * predicted_noise_x) / torch.sqrt(alpha_t)
+            y = (y - beta_t * predicted_noise_y) / torch.sqrt(alpha_t)
+            
+            # Mixing step
+            x_new = self.actor.mixing_p * x + (1 - self.actor.mixing_p) * y
+            y_new = self.actor.mixing_p * y + (1 - self.actor.mixing_p) * x
+            x, y = x_new, y_new
+        
+        # Compute compression loss: E[(x - y)²]
+        compression_loss = torch.mean((x - y) ** 2)
+        
+        return compression_loss
 
     def train(self, actor_buffer, advantages, state_type):
         """

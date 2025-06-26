@@ -17,4 +17,5 @@ RUNNER_REGISTRY = {
     "mappo": OnPolicyMARunner,
     "dappo": OnPolicyMARunner,
     "gappo": OnPolicyMARunner,
+    "fgappo": OnPolicyMARunner,
 }

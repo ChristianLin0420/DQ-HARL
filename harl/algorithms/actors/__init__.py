@@ -12,6 +12,7 @@ from harl.algorithms.actors.mappo import MAPPO
 from harl.algorithms.actors.dappo import DAPPO
 from harl.algorithms.actors.gappo import GAPPO
 from harl.algorithms.actors.fgappo import FGAPPO
+from harl.algorithms.actors.q_dappo import QDAPPO
 
 ALGO_REGISTRY = {
     "happo": HAPPO,
@@ -27,4 +28,5 @@ ALGO_REGISTRY = {
     "dappo": DAPPO,
     "gappo": GAPPO,
     "fgappo": FGAPPO,
+    "q_dappo": QDAPPO,
 }

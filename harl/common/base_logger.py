@@ -3,6 +3,7 @@
 import time
 import os
 import numpy as np
+from harl.utils.gradient_histogram_utils import log_gradient_histograms_with_stats
 
 
 class BaseLogger:
@@ -23,6 +24,10 @@ class BaseLogger:
         self.log_file = open(
             os.path.join(run_dir, "progress.txt"), "w", encoding="utf-8"
         )
+        
+        # Configuration for gradient histogram logging
+        self.log_gradient_histograms_enabled = algo_args.get("train", {}).get("log_gradient_histograms", False)
+        self.gradient_histogram_freq = algo_args.get("train", {}).get("gradient_histogram_freq", 100)
 
     def get_task_name(self):
         """Get the task name."""
@@ -65,7 +70,7 @@ class BaseLogger:
                 self.train_episode_rewards[t] = 0
 
     def episode_log(
-        self, actor_train_infos, critic_train_info, actor_buffer, critic_buffer
+        self, actor_train_infos, critic_train_info, actor_buffer, critic_buffer, actor_models=None, critic_models=None
     ):
         """Log information for each episode."""
         self.total_num_steps = (
@@ -90,6 +95,10 @@ class BaseLogger:
 
         critic_train_info["average_step_rewards"] = critic_buffer.get_mean_rewards()
         self.log_train(actor_train_infos, critic_train_info)
+
+        # Log gradient histograms if models are provided
+        if actor_models is not None or critic_models is not None:
+            self.log_gradient_histograms(actor_models, critic_models)
 
         print(
             "Average step reward is {}.".format(
@@ -185,6 +194,69 @@ class BaseLogger:
             # Also log to wandb
             if self.wandb_run:
                 self.wandb_run.log({critic_k: v}, step=self.total_num_steps)
+
+    def log_gradient_histograms(self, actor_models=None, critic_models=None):
+        """
+        Log gradient histograms for actor and critic models.
+        
+        Args:
+            actor_models: List of actor models or single actor model
+            critic_models: List of critic models or single critic model
+        """
+        if not self.log_gradient_histograms_enabled or self.wandb_run is None:
+            return
+            
+        # Only log gradients at specified frequency
+        if self.total_num_steps % self.gradient_histogram_freq != 0:
+            return
+        
+        # Log actor gradients
+        if actor_models is not None:
+            if isinstance(actor_models, list):
+                for agent_id, actor in enumerate(actor_models):
+                    if hasattr(actor, 'actor'):  # For actor wrappers
+                        log_gradient_histograms_with_stats(
+                            actor.actor, self.wandb_run, self.total_num_steps, 
+                            f"agent{agent_id}/actor/"
+                        )
+                    else:
+                        log_gradient_histograms_with_stats(
+                            actor, self.wandb_run, self.total_num_steps, 
+                            f"agent{agent_id}/actor/"
+                        )
+            else:
+                if hasattr(actor_models, 'actor'):  # For actor wrappers
+                    log_gradient_histograms_with_stats(
+                        actor_models.actor, self.wandb_run, self.total_num_steps, "actor/"
+                    )
+                else:
+                    log_gradient_histograms_with_stats(
+                        actor_models, self.wandb_run, self.total_num_steps, "actor/"
+                    )
+        
+        # Log critic gradients
+        if critic_models is not None:
+            if isinstance(critic_models, list):
+                for agent_id, critic in enumerate(critic_models):
+                    if hasattr(critic, 'critic'):  # For critic wrappers
+                        log_gradient_histograms_with_stats(
+                            critic.critic, self.wandb_run, self.total_num_steps, 
+                            f"agent{agent_id}/critic/"
+                        )
+                    else:
+                        log_gradient_histograms_with_stats(
+                            critic, self.wandb_run, self.total_num_steps, 
+                            f"agent{agent_id}/critic/"
+                        )
+            else:
+                if hasattr(critic_models, 'critic'):  # For critic wrappers
+                    log_gradient_histograms_with_stats(
+                        critic_models.critic, self.wandb_run, self.total_num_steps, "critic/"
+                    )
+                else:
+                    log_gradient_histograms_with_stats(
+                        critic_models, self.wandb_run, self.total_num_steps, "critic/"
+                    )
 
     def log_env(self, env_infos):
         """Log environment information."""

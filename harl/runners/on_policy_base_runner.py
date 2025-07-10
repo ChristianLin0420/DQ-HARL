@@ -256,6 +256,8 @@ class OnPolicyBaseRunner:
                     critic_train_info,
                     self.actor_buffer,
                     self.critic_buffer,
+                    actor_models=self.actor,
+                    critic_models=self.critic,
                 )
 
             # eval

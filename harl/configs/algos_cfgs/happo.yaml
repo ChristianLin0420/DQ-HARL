@@ -30,6 +30,12 @@ train:
   use_proper_time_limits: True
   # if set, load models from this directory; otherwise, randomly initialise the models
   model_dir: ~
+
+  # GRADIENT HISTOGRAM CONFIGURATION
+  # Enable gradient histogram logging to WandB
+  log_gradient_histograms: True
+  # Frequency of logging gradients (every N training steps)
+  gradient_histogram_freq: 100 
 eval:
   # whether to use evaluation
   use_eval: True

@@ -51,7 +51,7 @@ class SMACLogger(BaseLogger):
                 self.one_episode_len[i] = 0
 
     def episode_log(
-        self, actor_train_infos, critic_train_info, actor_buffer, critic_buffer
+        self, actor_train_infos, critic_train_info, actor_buffer, critic_buffer, actor_models=None, critic_models=None
     ):
         self.total_num_steps = (
             self.episode
@@ -135,6 +135,10 @@ class SMACLogger(BaseLogger):
 
         critic_train_info["average_step_rewards"] = critic_buffer.get_mean_rewards()
         self.log_train(actor_train_infos, critic_train_info)
+
+        # Log gradient histograms if models are provided
+        if actor_models is not None or critic_models is not None:
+            self.log_gradient_histograms(actor_models, critic_models)
 
         print(
             "Increase games {:.4f}, win rate on these games is {:.4f}, average step reward is {:.4f}, average episode length is {:.4f}, average episode reward is {:.4f}.\n".format(

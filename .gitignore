@@ -424,3 +424,7 @@ isaacgym/
 
 # docs
 docs/
+
+# users
+userinput.py
+.cursor/rules

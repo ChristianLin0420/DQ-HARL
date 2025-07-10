@@ -35,6 +35,12 @@ train:
   # if set, load models from this directory; otherwise, randomly initialise the models
   model_dir: ~
 
+  # GRADIENT HISTOGRAM CONFIGURATION
+  # Enable gradient histogram logging to WandB
+  log_gradient_histograms: True
+  # Frequency of logging gradients (every N training steps)
+  gradient_histogram_freq: 100
+
 eval:
   # whether to use evaluation
   use_eval: True
@@ -72,9 +78,9 @@ model:
   data_chunk_length: 10
   # optimizer parameters
   # actor learning rate
-  lr: 0.0001
+  lr: 0.0002
   # critic learning rate
-  critic_lr: 0.0005
+  critic_lr: 0.0003
   # eps in Adam
   opti_eps: 0.00001
   # weight_decay in Adam
@@ -89,9 +95,9 @@ model:
 
 optim:
   # learning rate for actor
-  lr: 0.0005
+  lr: 0.0002
   # learning rate for critic
-  critic_lr: 0.0005
+  critic_lr: 0.0003
   # eps for Adam optimizer
   opti_eps: 0.00001
   # weight decay for Adam optimizer
@@ -112,7 +118,7 @@ algo:
   # number of mini-batches per epoch for critic update
   critic_num_mini_batch: 1
   # coefficient for entropy term in actor loss
-  entropy_coef: 0.05
+  entropy_coef: 0.02
   # coefficient for value loss
   value_loss_coef: 1
   # whether to clip gradient norm
@@ -142,15 +148,15 @@ algo:
   # Q-weight transformation method
   q_weight_type: "softmax"  # softmax, exp, sigmoid, advantage
   # Temperature for Q-weight transformation
-  q_temperature: 1.0
+  q_temperature: 3.0
   # Coefficient for Q-weighted loss
   q_weight_coef: 1.0
   # Coefficient for diffusion entropy regularization
-  diffusion_entropy_coef: 0.01
+  diffusion_entropy_coef: 0.0
   # Whether to clip Q-values
   use_q_clipping: True
   # Q-value clipping range
-  q_clip_range: [-10.0, 10.0]
+  q_clip_range: [-5.0, 5.0]
   
   # Sample generation parameters (Algorithm 1 from QVPO)
   # Number of samples from diffusion policy (Nd) - reduced for memory efficiency
@@ -166,17 +172,17 @@ algo:
   
   # Original DAPPO/GenPO parameters
   # coefficient for entropy loss with importance sampling
-  lambda_ent: 0.01
+  lambda_ent: 0.005
   # coefficient for compression loss
-  nu_compression: 0.01
+  nu_compression: 0.0
   # whether to enable adaptive learning rate
   adaptive_lr: True
   # KL threshold to decrease learning rate
-  kl_threshold_high: 0.02
+  kl_threshold_high: 0.015
   # KL threshold to increase learning rate
-  kl_threshold_low: 0.005
+  kl_threshold_low: 0.003
   # factor for learning rate adjustment
-  lr_adjustment_factor: 2.0
+  lr_adjustment_factor: 1.5
   
   # diffusion parameters
   # number of diffusion timesteps (reduced for memory efficiency)

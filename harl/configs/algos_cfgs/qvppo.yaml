@@ -1,0 +1,242 @@
+# QVPPO Configuration - Q-weighted Variational Policy Optimization
+# Combines Q-weighted optimization from QAPPO with diffusion policies from DAPPO
+# Implements the HA-QVPO algorithm for heterogeneous multi-agent reinforcement learning
+
+seed:
+  # whether to use the specified seed
+  seed_specify: True
+  # seed
+  seed: 1
+
+device:
+  # whether to use CUDA
+  cuda: True
+  # whether to set CUDA deterministic
+  cuda_deterministic: True
+  # arg to torch.set_num_threads
+  torch_threads: 4
+
+train:
+  # number of parallel environments for training data collection
+  n_rollout_threads: 16
+  # number of total training steps
+  num_env_steps: 10000000
+  # number of steps per environment per training data collection
+  episode_length: 200
+  # logging interval
+  log_interval: 5
+  # evaluation interval
+  eval_interval: 25
+  # whether to use ValueNorm
+  use_valuenorm: True
+  # whether to use linear learning rate decay (disabled for QVPPO's adaptive features)
+  use_linear_lr_decay: False
+  # whether to consider the case of truncation when an episode is done
+  use_proper_time_limits: True
+  # if set, load models from this directory; otherwise, randomly initialise the models
+  model_dir: ~
+
+  # GRADIENT HISTOGRAM CONFIGURATION
+  # Enable gradient histogram logging to WandB
+  log_gradient_histograms: True
+  # Frequency of logging gradients (every N training steps)
+  gradient_histogram_freq: 100
+
+eval:
+  # whether to use evaluation
+  use_eval: True
+  # number of parallel environments for evaluation
+  n_eval_rollout_threads: 8
+  # number of episodes per evaluation
+  eval_episodes: 20
+
+render:
+  # whether to use render
+  use_render: False
+  # number of episodes to render
+  render_episodes: 10
+
+model:
+  # network parameters
+  # hidden sizes for mlp module in the network (larger for diffusion complexity)
+  hidden_sizes: [128, 128]
+  # activation function, choose from sigmoid, tanh, relu, leaky_relu, silu, selu, gelu
+  activation_func: gelu
+  # whether to use feature normalization
+  use_feature_normalization: True
+  # initialization method for network parameters, choose from xavier_uniform_, orthogonal_, ...
+  initialization_method: orthogonal_
+  # gain of the output layer of the network
+  gain: 0.01
+  # recurrent parameters
+  # whether to use rnn policy (data is not chunked for training)
+  use_naive_recurrent_policy: False
+  # whether to use rnn policy (data is chunked for training)
+  use_recurrent_policy: False
+  # number of recurrent layers
+  recurrent_n: 1
+  # length of data chunk; only useful when use_recurrent_policy is True; episode_length has to be a multiple of data_chunk_length
+  data_chunk_length: 10
+  # optimizer parameters
+  # actor learning rate (lower for diffusion stability)
+  lr: 0.0001
+  # critic learning rate
+  critic_lr: 0.0005
+  # eps in Adam
+  opti_eps: 0.00001
+  # weight_decay in Adam
+  weight_decay: 0
+  # parameters of diagonal Gaussian distribution
+  std_x_coef: 1
+  # parameters of diagonal Gaussian distribution
+  std_y_coef: 0.5
+  # diffusion model specific parameters
+  # time embedding dimension for diffusion process
+  time_embed_dim: 16
+
+algo:
+  # PPO parameters
+  # number of epochs for actor update
+  ppo_epoch: 5
+  # number of epochs for critic update
+  critic_epoch: 5
+  # whether to use clipped value loss
+  use_clipped_value_loss: True
+  # clip parameter (smaller for diffusion stability)
+  clip_param: 0.1
+  # number of mini-batches per epoch for actor update
+  actor_num_mini_batch: 1
+  # number of mini-batches per epoch for critic update
+  critic_num_mini_batch: 1
+  # coefficient for entropy term in actor loss
+  entropy_coef: 0.02
+  # coefficient for value loss
+  value_loss_coef: 1
+  # whether to clip gradient norm
+  use_max_grad_norm: True
+  # max gradient norm (smaller for diffusion stability)
+  max_grad_norm: 5.0
+  # whether to use Generalized Advantage Estimation (GAE)
+  use_gae: True
+  # discount factor
+  gamma: 0.99
+  # GAE lambda
+  gae_lambda: 0.95
+  # whether to use huber loss
+  use_huber_loss: True
+  # whether to use policy active masks
+  use_policy_active_masks: True
+  # huber delta
+  huber_delta: 10.0
+  # method of aggregating the probability of multi-dimensional actions, choose from prod, mean, sum
+  action_aggregation: sum
+  # whether to share parameter among actors
+  share_param: False
+  # whether to use a fixed optimisation order (False for Q-value based ordering)
+  fixed_order: False
+  
+  # ================== Q-VALUE ORDERING PARAMETERS ==================
+  # Q-value based agent ordering configuration
+  use_q_ordering: True
+  # Q-ordering mode: "descending" (highest Q-value first) or "ascending" (lowest Q-value first)
+  q_ordering_mode: "descending"
+  
+  # ================== Q-WEIGHTED OPTIMIZATION PARAMETERS ==================
+  # Q-weight transformation method for VLO loss weighting
+  q_weight_type: "advantage"  # softmax, exp, sigmoid, advantage (recommended for QVPPO)
+  # Temperature for Q-weight transformation
+  q_temperature: 1.0
+  # Coefficient for Q-weighted loss
+  q_weight_coef: 10.0
+  # Whether to clip Q-values for numerical stability
+  use_q_clipping: True
+  # Q-value clipping range
+  q_clip_range: [-10.0, 10.0]
+  
+  # Q-guided action sampling parameters
+  # Whether to use Q-guided action sampling during training
+  use_q_guidance: True
+  # Number of action samples for Q-guidance
+  num_q_samples: 6
+  # Sampling method for Q-guidance
+  q_sample_method: "mixed_sampling"  # policy_sampling, mixed_sampling
+  
+  # Q-entropy regularization
+  # Whether to use Q-entropy regularization
+  use_q_entropy: True
+  # Coefficient for Q-entropy regularization
+  q_entropy_coef: 0.005
+  
+  # Q-critic specific parameters
+  # Polyak averaging coefficient for target network updates
+  polyak: 0.005
+  
+  # ================== QVPPO SPECIFIC PARAMETERS ==================
+  # Variational Lower Bound (VLO) loss parameters
+  # Weight for the Q-weighted VLO loss
+  vlo_loss_weight: 1.0
+  # Whether to use advantage-based Q-weighting (recommended)
+  use_advantage_weighting: True
+  
+  # Diffusion entropy regularization
+  # Coefficient for diffusion entropy regularization
+  diffusion_entropy_coef: 0.01
+  # Number of diffusion samples for entropy computation
+  num_diffusion_samples: 8
+  
+  # Timestep sampling strategy for diffusion training
+  # "uniform" or "importance" (importance sampling focuses on middle timesteps)
+  timestep_sampling_strategy: "uniform"
+  
+  # Numerical stability parameters
+  # Small epsilon for numerical stability
+  epsilon_stability: 1e-8
+  # Gradient clipping norm for additional stability
+  gradient_clip_norm: 1.0
+  # Small epsilon for action bounds
+  action_bound_epsilon: 1e-6
+  
+  # ================== DIFFUSION PARAMETERS ==================
+  # Diffusion process configuration
+  # number of diffusion timesteps for noise schedule
+  num_diffusion_steps: 10
+  # mixing probability for coupled noise vectors in GenPO
+  mixing_p: 0.9
+  # start value for beta noise schedule
+  beta_start: 0.0001
+  # end value for beta noise schedule
+  beta_end: 0.02
+  
+  # ================== QVPPO RUNNER PARAMETERS ==================
+  # QVPPO runner specific configuration
+  # Whether to use shared observations for QVPPO Q-critic
+  use_share_obs_for_qvppo: True
+  # Critic update frequency (1 = every training step)
+  qvppo_critic_update_freq: 1
+
+logger:
+  # logging directory
+  log_dir: "./results"
+
+# ================== ALGORITHM DESCRIPTION ==================
+# QVPPO (Q-weighted Variational Policy Optimization) Configuration
+# 
+# This algorithm combines:
+# 1. Q-weighted optimization from QAPPO for better sample efficiency
+# 2. Diffusion policies from DAPPO for expressive multimodal action generation  
+# 3. Q-value based agent ordering for improved coordination
+# 4. Advantage-based Q-weighting for stable training
+# 5. Variational Lower Bound (VLO) loss for diffusion policy training
+#
+# Key Features:
+# - Q-weighted VLO loss: L_HA-QVPO = E[w_q(s,a) * M_{1:m}(s,a) * ||ε - ε_θ(...)||²]
+# - Advantage-based Q-weights: w_q(s,a) = max(A_π(s,a), 0)
+# - Sequential agent coordination with importance sampling
+# - Diffusion entropy regularization for exploration
+# - Numerical stability safeguards throughout
+#
+# For optimal performance:
+# - Use advantage-based Q-weighting (use_advantage_weighting: True)
+# - Enable Q-value based agent ordering (use_q_ordering: True)
+# - Consider environment-specific tuning of diffusion parameters
+# - Monitor VLO loss and Q-weight distributions during training 

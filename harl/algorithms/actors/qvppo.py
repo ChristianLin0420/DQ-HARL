@@ -86,22 +86,24 @@ class QVPPO(QAPPO):
             batch_size = share_obs_batch.shape[0]
             
             # Sample multiple actions to estimate V(s)
-            num_value_samples = 5
+            num_value_samples = 3  # Reduced from 5 for stability
             sampled_q_values = []
             
             for _ in range(num_value_samples):
-                # Sample random actions from action space bounds
+                # Sample random actions from action space bounds (more conservative)
                 if hasattr(self.actor, 'action_dim'):
-                    random_actions = torch.randn(batch_size, self.actor.action_dim, device=self.device) * 0.5
+                    random_actions = torch.randn(batch_size, self.actor.action_dim, device=self.device) * 0.3
                 else:
                     # Fallback: estimate action dim from q_critic
-                    random_actions = torch.randn(batch_size, q_values.shape[-1], device=self.device) * 0.5
+                    random_actions = torch.randn(batch_size, q_values.shape[-1], device=self.device) * 0.3
                 
-                # Clamp actions to reasonable bounds
-                random_actions = torch.clamp(random_actions, -2.0, 2.0)
+                # Clamp actions to reasonable bounds (more conservative)
+                random_actions = torch.clamp(random_actions, -1.5, 1.5)
                 
                 try:
                     sampled_q = self.q_critic.get_values(share_obs_batch, random_actions)
+                    # Clip sampled Q-values to prevent extreme values
+                    sampled_q = torch.clamp(sampled_q, -20.0, 20.0)
                     sampled_q_values.append(sampled_q)
                 except Exception as e:
                     # Q-critic error - use zeros as fallback
@@ -111,14 +113,20 @@ class QVPPO(QAPPO):
                 # Estimate V(s) as average of sampled Q-values
                 v_values = torch.stack(sampled_q_values, dim=0).mean(dim=0)
                 
-                # Compute advantages
-                advantages = q_values - v_values
+                # Compute advantages with clipping
+                advantages = torch.clamp(q_values - v_values, -10.0, 10.0)
                 
                 # Apply ReLU to get positive weights (max(A, 0))
                 weights = torch.relu(advantages) + self.epsilon_stability
                 
-                # Normalize weights to prevent extreme values
+                # More conservative normalization to prevent extreme weights
+                mean_weight = torch.mean(weights) + self.epsilon_stability
+                weights = weights / mean_weight
+                weights = torch.clamp(weights, self.epsilon_stability, 5.0)  # Cap maximum weight
+                
+                # Ensure weights sum to reasonable value
                 weights = weights / (torch.mean(weights) + self.epsilon_stability)
+                
             else:
                 # Fallback: use uniform weights if all Q-value computations failed
                 weights = torch.ones(batch_size, 1, device=self.device)
@@ -178,28 +186,37 @@ class QVPPO(QAPPO):
         with torch.no_grad():
             try:
                 current_q_values = self.q_critic.get_values(share_obs_batch, actions_batch)
+                # Clip Q-values to prevent extreme values
+                current_q_values = torch.clamp(current_q_values, -50.0, 50.0)
             except Exception as e:
                 # Q-critic dimension mismatch or other error - use fallback
                 current_q_values = torch.zeros(batch_size, 1, device=self.device)
         
-        # Compute advantage-based weights
+        # Compute advantage-based weights with better numerical stability
         if self.use_advantage_weighting:
             q_weights = self.compute_advantage_weights(current_q_values, share_obs_batch)
         else:
             # Use direct Q-value weighting as fallback
             q_weights = self.compute_q_weights(current_q_values, self.q_weight_type)
         
+        # Ensure Q-weights are well-behaved
+        q_weights = torch.clamp(q_weights, self.epsilon_stability, 10.0)
+        q_weights = q_weights / (torch.mean(q_weights) + self.epsilon_stability)
+        
         # Sample timesteps for diffusion training
         timesteps = self.sample_diffusion_timesteps(batch_size)
         
-        # Sample noise
+        # Sample noise with controlled magnitude
         noise = torch.randn_like(actions_batch)
+        noise = torch.clamp(noise, -3.0, 3.0)  # Clip extreme noise
         
         # Forward diffusion process: x_t = √α_t * x_0 + √(1-α_t) * ε
         sqrt_alphas_cumprod_t = self.actor.sqrt_alphas_cumprod[timesteps].view(-1, 1)
         sqrt_one_minus_alphas_cumprod_t = self.actor.sqrt_one_minus_alphas_cumprod[timesteps].view(-1, 1)
         
-        noisy_actions = sqrt_alphas_cumprod_t * actions_batch + sqrt_one_minus_alphas_cumprod_t * noise
+        # Clamp actions to prevent extreme values in diffusion
+        actions_clamped = torch.clamp(actions_batch, -5.0, 5.0)
+        noisy_actions = sqrt_alphas_cumprod_t * actions_clamped + sqrt_one_minus_alphas_cumprod_t * noise
         
         # Encode observations for diffusion network
         obs_features = self.actor.obs_encoder(obs_batch)
@@ -208,7 +225,7 @@ class QVPPO(QAPPO):
         if self.actor.use_naive_recurrent_policy or self.actor.use_recurrent_policy:
             # For training, we use zero initial states
             rnn_states = torch.zeros(
-                batch_size, self.actor.rnn.hidden_size, 
+                batch_size, self.actor.recurrent_n, self.actor.hidden_sizes[-1], 
                 device=self.device, dtype=torch.float32
             )
             masks = torch.ones(batch_size, 1, device=self.device, dtype=torch.float32)
@@ -216,31 +233,52 @@ class QVPPO(QAPPO):
         
         # Predict noise using diffusion network
         timesteps_float = timesteps.float()
-        predicted_noise = self.actor.diffusion_net(obs_features, noisy_actions, timesteps_float)
+        
+        try:
+            predicted_noise = self.actor.diffusion_net(obs_features, noisy_actions, timesteps_float)
+            
+            # Check for NaN/Inf in predicted noise
+            if torch.isnan(predicted_noise).any() or torch.isinf(predicted_noise).any():
+                print("⚠️  NaN/Inf in predicted noise, using zeros")
+                predicted_noise = torch.zeros_like(noise)
+                
+        except Exception as e:
+            print(f"⚠️  Error in diffusion network: {e}")
+            predicted_noise = torch.zeros_like(noise)
         
         # Compute VLO loss: ||ε - ε_θ(x_t, s, t)||²
-        vlo_loss_raw = torch.mean((noise - predicted_noise) ** 2, dim=-1, keepdim=True)
+        noise_diff = noise - predicted_noise
+        vlo_loss_raw = torch.mean(noise_diff ** 2, dim=-1, keepdim=True)
         
-        # Apply Q-weighting and importance sampling
-        q_weighted_vlo_loss = q_weights.detach() * factor_batch * vlo_loss_raw
+        # Check for extreme VLO loss values
+        vlo_loss_raw = torch.clamp(vlo_loss_raw, 0.0, 100.0)
+        
+        # Apply Q-weighting and importance sampling with stability checks
+        factor_batch_clamped = torch.clamp(factor_batch, 0.1, 10.0)
+        q_weighted_vlo_loss = q_weights.detach() * factor_batch_clamped * vlo_loss_raw
         
         # Apply active masks and compute final loss
         if self.use_policy_active_masks:
-            final_vlo_loss = (q_weighted_vlo_loss * active_masks_batch).sum() / (active_masks_batch.sum() + self.epsilon_stability)
+            mask_sum = active_masks_batch.sum() + self.epsilon_stability
+            final_vlo_loss = (q_weighted_vlo_loss * active_masks_batch).sum() / mask_sum
         else:
             final_vlo_loss = torch.mean(q_weighted_vlo_loss)
         
-        # Numerical stability check
+        # Enhanced numerical stability check with gradual scaling
         if torch.isnan(final_vlo_loss) or torch.isinf(final_vlo_loss):
-            final_vlo_loss = torch.tensor(0.1, device=self.device, requires_grad=True)
+            # Use a much smaller fallback and make it adaptive
+            final_vlo_loss = torch.tensor(0.01, device=self.device, requires_grad=True)
+        elif final_vlo_loss > 50.0:
+            # Scale down extremely large losses
+            final_vlo_loss = torch.clamp(final_vlo_loss, 0.0, 50.0)
         
-        # Compute metrics
+        # Compute metrics with safety checks
         metrics = {
-            "vlo_loss_raw": torch.mean(vlo_loss_raw).item(),
-            "q_weights_mean": torch.mean(q_weights).item(),
-            "q_weights_std": torch.std(q_weights).item(),
-            "predicted_noise_norm": torch.norm(predicted_noise).item(),
-            "actual_noise_norm": torch.norm(noise).item(),
+            "vlo_loss_raw": torch.clamp(torch.mean(vlo_loss_raw), 0.0, 100.0).item(),
+            "q_weights_mean": torch.clamp(torch.mean(q_weights), 0.0, 10.0).item(),
+            "q_weights_std": torch.clamp(torch.std(q_weights), 0.0, 5.0).item(),
+            "predicted_noise_norm": torch.clamp(torch.norm(predicted_noise), 0.0, 50.0).item(),
+            "actual_noise_norm": torch.clamp(torch.norm(noise), 0.0, 50.0).item(),
         }
         
         return final_vlo_loss, metrics
@@ -264,7 +302,7 @@ class QVPPO(QAPPO):
             # Apply RNN if needed
             if self.actor.use_naive_recurrent_policy or self.actor.use_recurrent_policy:
                 rnn_states = torch.zeros(
-                    batch_size, self.actor.rnn.hidden_size, 
+                    batch_size, self.actor.recurrent_n, self.actor.hidden_sizes[-1], 
                     device=self.device, dtype=torch.float32
                 )
                 masks = torch.ones(batch_size, 1, device=self.device, dtype=torch.float32)

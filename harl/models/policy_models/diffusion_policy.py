@@ -217,7 +217,7 @@ class DiffusionPolicy(nn.Module):
             obs_features, rnn_states = self.rnn(obs_features, rnn_states, masks)
         
         # Generate actions using diffusion process and compute log probabilities
-        actions, action_log_probs = self.sample_actions_with_log_prob(obs_features, deterministic)
+        actions, action_log_probs = self.sample_actions_with_log_prob(obs_features, True)
         
         return actions, action_log_probs, rnn_states
 

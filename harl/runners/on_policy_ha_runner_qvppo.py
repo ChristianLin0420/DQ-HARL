@@ -1,4 +1,5 @@
 """Runner for on-policy HARL algorithms with QVPPO support and Q-value based agent ordering."""
+import os
 import numpy as np
 import torch
 from harl.utils.trans_tools import _t2n
@@ -181,16 +182,44 @@ class OnPolicyHARunnerQVPPO(OnPolicyHARunnerQOrder):
                 .reshape(-1, *self.actor_buffer[agent_id].active_masks.shape[2:]),
             )
 
-            # update factor for next agent
-            factor = factor * _t2n(
-                getattr(torch, self.action_aggregation)(
-                    torch.exp(new_actions_logprob - old_actions_logprob), dim=-1
-                ).reshape(
-                    self.algo_args["train"]["episode_length"],
-                    self.algo_args["train"]["n_rollout_threads"],
-                    1,
-                )
-            )
+            # update factor for next agent with numerical stability
+            logprob_diff = new_actions_logprob - old_actions_logprob
+            
+            # Clip log probability differences to prevent overflow in exp()
+            # Clamping to [-10, 10] means ratios stay in [exp(-10), exp(10)] = [0.000045, 22026]
+            logprob_diff_clamped = torch.clamp(logprob_diff, -10.0, 10.0)
+            
+            # Compute importance ratios with clamped differences
+            importance_ratios = torch.exp(logprob_diff_clamped)
+            
+            # Additional clipping on the ratios themselves for safety
+            importance_ratios = torch.clamp(importance_ratios, 0.01, 100.0)
+            
+            # Apply action aggregation
+            aggregated_ratios = getattr(torch, self.action_aggregation)(importance_ratios, dim=-1)
+            
+            # Reshape and convert to numpy
+            ratio_factor = _t2n(aggregated_ratios.reshape(
+                self.algo_args["train"]["episode_length"],
+                self.algo_args["train"]["n_rollout_threads"],
+                1,
+            ))
+            
+            # Check for NaN/Inf before multiplication
+            if np.isnan(ratio_factor).any() or np.isinf(ratio_factor).any():
+                print(f"⚠️  NaN/Inf in ratio_factor for agent {agent_id}, using ones")
+                ratio_factor = np.ones_like(ratio_factor)
+            
+            # Update factor with additional overflow protection
+            new_factor = factor * ratio_factor
+            
+            # Final safety check on the accumulated factor
+            if np.isnan(new_factor).any() or np.isinf(new_factor).any():
+                print(f"⚠️  NaN/Inf in accumulated factor for agent {agent_id}, resetting")
+                factor = np.ones_like(factor)  # Reset to neutral factor
+            else:
+                # Clamp factor to reasonable range to prevent explosive growth
+                factor = np.clip(new_factor, 0.001, 1000.0)
             actor_train_infos.append(actor_train_info)
 
         # update critic (update frequency can be adjusted for QVPPO)
@@ -216,8 +245,8 @@ class OnPolicyHARunnerQVPPO(OnPolicyHARunnerQOrder):
         for agent_id in range(self.num_agents):
             if hasattr(self.actor[agent_id], 'q_critic'):
                 try:
-                    qvppo_save_dir = self.save_dir / f"qvppo_agent_{agent_id}"
-                    qvppo_save_dir.mkdir(exist_ok=True)
+                    qvppo_save_dir = f"{self.save_dir}/qvppo_agent_{agent_id}"
+                    os.makedirs(qvppo_save_dir, exist_ok=True)
                     self.actor[agent_id].q_critic.save(qvppo_save_dir)
                     print(f"💾 QVPPO agent {agent_id} Q-critic saved to {qvppo_save_dir}")
                 except Exception as e:
